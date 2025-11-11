@@ -1,0 +1,388 @@
+---
+title: "Systematic Conservation Planning"
+author: "J.Borchard"
+date: "2025-11-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Systematic Conservation Planning
+
+Systematic conservation planning (SCP) is a structured, data-driven approach for identifying and prioritizing areas for conservation while balancing competing land-use goals, such as agriculture, forestry, or industrial development. Instead of making ad hoc decisions, SCP uses spatial data on biodiversity, habitat quality, and economic or social costs to determine which areas should be protected or restored in order to efficiently meet conservation targets. By explicitly considering trade-offs between conservation and other land uses, SCP allows planners to select areas that maximize ecological benefits—such as restoring wetlands or afforestation—while minimizing conflicts with human activities. This approach provides a transparent and reproducible framework for making land-use decisions that support both conservation and sustainable development.
+
+### Feature layers
+
+```{r include = F}
+# Load packages
+library(raster)
+library(prioritizr)
+library(terra)
+library(ggplot2)
+
+# ---- 1. Simulate raster layers ----
+set.seed(123)  # reproducibility
+
+# Create a raster template (50 x 50 cells)
+r_template <- raster(ncol = 50, nrow = 50, xmn = 0, xmx = 50, ymn = 0, ymx = 50)
+
+# Generate simulated surfaces (0–1)
+grazing <- raster::setValues(r_template, runif(ncell(r_template), 0, 1))
+agriculture <- raster::setValues(r_template, runif(ncell(r_template), 0, 1))
+afforestation <- raster::setValues(r_template, runif(ncell(r_template), 0, 1))
+wetland <- raster::setValues(r_template, runif(ncell(r_template), 0, 1))
+
+# Optional: smooth surfaces slightly (for nicer maps)
+grazing <- focal(grazing, w = matrix(1, 3, 3), mean)
+agriculture <- focal(agriculture, w = matrix(1, 3, 3), mean)
+afforestation <- focal(afforestation, w = matrix(1, 3, 3), mean)
+wetland <- focal(wetland, w = matrix(1, 3, 3), mean)
+
+# ---- 2. Stack layers ----
+suit_stack <- stack(grazing, agriculture, afforestation, wetland)
+names(suit_stack) <- c("grazing", "agriculture", "afforestation", "wetland")
+
+# ---- 3. Define cost and features ----
+# We'll use grazing + agriculture as the combined cost surface
+cost_surface <- (grazing + agriculture) / 2
+
+# ---- 4. Set up prioritizr problem ----
+# Features: afforestation, wetland
+# Target: 30% of each feature’s total distribution
+
+```
+
+```{r fig.height= 7, fig.width= 7}
+
+par(mfrow = c(2, 2))
+plot(grazing, main = "Grazing suitability")
+plot(agriculture, main = "Agriculture suitability")
+plot(afforestation, main = "Afforestation suitability")
+plot(wetland, main = "Wetland reclamation suitability")
+
+```
+
+### Cost layer
+
+In systematic conservation prioritization, a cost layer represents the relative “price” or difficulty of selecting a given area for conservation. Rather than monetary cost alone, it captures the degree of competition between conservation and other land uses, such as agriculture, forestry, or urban development. In landscapes where human activities are intense—such as fertile agricultural zones, productive grazing lands, or expanding urban areas—the cost of conservation is high because setting aside land for protection would displace profitable or socially important uses. Conversely, regions with low agricultural productivity, degraded habitats, or limited infrastructure are assigned lower costs, making them more suitable for conservation actions like afforestation or wetland restoration. By incorporating this cost surface into the prioritization model, planners can identify areas that achieve ecological goals efficiently—protecting biodiversity while minimizing conflicts with farming and human development.
+
+
+```{r fig.height= 4, fig.width= 4}
+library(viridis)
+
+plot(cost_surface,
+     col = viridis(100),
+     main = "Cost Surface - Agriculture and Grazing")
+
+```
+
+
+## SCP scenarios {.tabset}
+
+### Scenario 1
+
+**Conservation target: 15% Afforestation and 15% wetland reclamation (total of 30%)**
+
+```{r include = F}
+
+# ----------------------------
+# Hierarchical SCP: Wetlands first, Forest second
+# ----------------------------
+
+library(terra)
+library(prioritizr)
+
+# ---- 1. Create or convert raster layers ----
+# Assume you already have:
+# r_template (RasterLayer template)
+# afforestation, wetland (RasterLayer)
+# cost_surface (RasterLayer)
+
+# Convert to terra SpatRaster
+cost_surface_terra <- rast(cost_surface)
+afforestation_terra <- rast(afforestation)
+wetland_terra <- rast(wetland)
+
+# ---- 2. Create binary feature rasters ----
+affor_bin <- ifel(afforestation_terra > 0.5, 1, 0)
+wetland_bin <- ifel(wetland_terra > 0.5, 1, 0)
+
+# ---- 3. Set targets ----
+total_pixels <- ncell(cost_surface_terra)
+wetland_target <- ceiling(0.15 * total_pixels)  # 15% wetlands
+forest_target  <- ceiling(0.15 * total_pixels)  # 15% forests
+
+# ---- 4. Step 1: Prioritize wetlands ----
+p_wet <- problem(cost_surface_terra, features = wetland_bin) %>%
+  add_min_set_objective() %>%
+  add_absolute_targets(wetland_target) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = TRUE)
+
+s_wet <- solve(p_wet, force = TRUE)
+cat("Wetland pixels selected:", sum(values(s_wet), na.rm = TRUE), "\n")
+
+# ---- 5. Step 2: Prioritize forests on remaining pixels ----
+# Mask out wetland-selected pixels
+forest_bin <- affor_bin
+forest_bin[s_wet == 1] <- 0  # wetlands take precedence
+
+p_forest <- problem(cost_surface_terra, features = forest_bin) %>%
+  add_min_set_objective() %>%
+  add_absolute_targets(forest_target) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = TRUE)
+
+s_forest <- solve(p_forest, force = TRUE)
+cat("Forest pixels selected:", sum(values(s_forest), na.rm = TRUE), "\n")
+
+# ---- 6. Step 3: Combine results into final map ----
+# 0 = not selected, 1 = wetland, 2 = forest
+final_map <- s_wet * 1 + s_forest * 2
+
+# ---- 7. Step 4: Plot ----
+
+
+
+```
+
+```{r fig.width= 5, fig.height= 5, echo=FALSE}
+
+plot(final_map, col = c("white", "blue", "darkgreen"))
+# Terra will automatically create a legend on the side
+
+```
+
+This workflow implements a hierarchical, sequential SCP. The process begins by prioritizing wetlands, selecting the pixels that meet a 15% target of the total landscape. Once these wetland pixels are chosen, they are “locked in” and removed from the available pool of pixels for subsequent prioritization. The next step prioritizes forests, selecting another 15% of the landscape from the remaining, non-wetland pixels. This sequential approach ensures that wetlands take precedence and that no pixel is assigned to both features, preventing mixed pixels. Finally, the selected wetlands and forests are combined into a single map, where unselected pixels are shown in white, wetlands in blue, and forests in green. This method guarantees that the conservation targets are met while maintaining clear separation between the two feature types and avoiding overlap.
+
+
+```{r}
+# ---- Calculate costs for Scenario 1 ----
+
+# Wetlands cost
+wetland_cost <- global(cost_surface_terra * s_wet, fun = "sum", na.rm = TRUE)[[1]]
+
+# Forest cost
+forest_cost <- global(cost_surface_terra * s_forest, fun = "sum", na.rm = TRUE)[[1]]
+
+# Total cost
+total_cost <- wetland_cost + forest_cost
+
+# Print results
+cat("Wetland selection cost:", wetland_cost, "\n")
+cat("Forest selection cost:", forest_cost, "\n")
+cat("Total cost of selected areas:", total_cost, "\n")
+
+```
+
+### Scenario 2
+
+**Conservation target: 15% Afforestation and 15% wetland reclamation with future plans of urbanization or industrialization**
+
+```{r include = F}
+library(terra)
+library(prioritizr)
+library(RColorBrewer)
+
+# ----------------------------
+# 1. Convert existing layers to terra
+# ----------------------------
+cost_surface_terra <- rast(cost_surface)
+afforestation_terra <- rast(afforestation)
+wetland_terra <- rast(wetland)
+
+# ----------------------------
+# 2. Create urban zones as polygons
+# ----------------------------
+# Function to make a rectangle polygon from coordinates
+make_rect <- function(xmin, ymin, xmax, ymax) {
+  vect(matrix(c(
+    xmin, ymin,
+    xmin, ymax,
+    xmax, ymax,
+    xmax, ymin,
+    xmin, ymin  # close the polygon
+  ), ncol=2, byrow=TRUE), type="polygons")
+}
+
+# Create list of polygons
+urban_polys_list <- list(
+  make_rect(5, 10, 20, 20),
+  make_rect(35, 5, 75, 15),
+  make_rect(20, 35, 30, 45)
+)
+
+# Combine into a single SpatVector
+urban_polys <- do.call(rbind, urban_polys_list)
+crs(urban_polys) <- crs(cost_surface_terra)
+
+# Rasterize polygons to match cost surface
+urban_raster <- rasterize(urban_polys, cost_surface_terra, field=1)
+urban_raster[is.na(urban_raster)] <- 0  # non-urban = 0
+
+# Assign very high cost to urban areas
+cost_surface_terra[urban_raster == 1] <- max(values(cost_surface_terra), na.rm = TRUE) * 10
+
+# ----------------------------
+# 3. Create binary feature rasters
+# ----------------------------
+affor_bin <- ifel(afforestation_terra > 0.5, 1, 0)
+wetland_bin <- ifel(wetland_terra > 0.5, 1, 0)
+
+# ----------------------------
+# 4. Set targets (15% each)
+# ----------------------------
+total_pixels <- ncell(cost_surface_terra)
+wetland_target <- ceiling(0.15 * total_pixels)
+forest_target  <- ceiling(0.15 * total_pixels)
+
+# ----------------------------
+# 5. Step 1: Prioritize wetlands
+# ----------------------------
+p_wet <- problem(cost_surface_terra, features = wetland_bin) %>%
+  add_min_set_objective() %>%
+  add_absolute_targets(wetland_target) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = TRUE)
+
+s_wet <- solve(p_wet, force = TRUE)
+cat("Wetland pixels selected:", sum(values(s_wet), na.rm = TRUE), "\n")
+
+# ----------------------------
+# 6. Step 2: Prioritize forests on remaining pixels
+# ----------------------------
+forest_bin <- affor_bin
+forest_bin[s_wet == 1] <- 0  # wetlands take precedence
+
+p_forest <- problem(cost_surface_terra, features = forest_bin) %>%
+  add_min_set_objective() %>%
+  add_absolute_targets(forest_target) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = TRUE)
+
+s_forest <- solve(p_forest, force = TRUE)
+cat("Forest pixels selected:", sum(values(s_forest), na.rm = TRUE), "\n")
+
+# ----------------------------
+# 7. Combine results
+# ----------------------------
+# 0 = not selected, 1 = wetland, 2 = forest
+final_map <- s_wet * 1 + s_forest * 2
+
+# ----------------------------
+# 8. Plot
+# ----------------------------
+
+```
+
+```{r fig.width= 5, fig.height= 5, echo=FALSE}
+
+cols <- c("white", "blue", "darkgreen")
+plot(final_map, col = cols)
+
+# Overlay urban polygons in red
+plot(urban_polys, add = TRUE, col = "red", border = "black", lwd = 2)
+
+```
+
+In this scenario, there are proposed plans for urbanization and industrial development within the study area, represented as high-cost zones in the conservation prioritization analysis. These urban polygons are treated as areas where land acquisition or conservation is prohibitively expensive, effectively discouraging the selection of these sites for wetland or forest protection. By explicitly incorporating these zones into the cost surface, the systematic conservation prioritization algorithm prioritizes ecologically valuable areas that are less impacted by human infrastructure. Wetlands and forests are selected sequentially to meet the 15% conservation targets for each feature while avoiding conflicts with urbanized or industrial lands, ensuring that conservation planning is both ecologically effective and realistically achievable within the context of ongoing human development.
+
+
+
+```{r}
+
+# Wetlands cost
+wetland_cost <- global(cost_surface_terra * s_wet, fun = "sum", na.rm = TRUE)[[1]]
+
+# Forest cost
+forest_cost <- global(cost_surface_terra * s_forest, fun = "sum", na.rm = TRUE)[[1]]
+
+# Total cost
+total_cost <- wetland_cost + forest_cost
+
+# Print results
+cat("Wetland selection cost:", wetland_cost, "\n")
+cat("Forest selection cost:", forest_cost, "\n")
+cat("Total cost of selected areas:", total_cost, "\n")
+
+
+```
+
+### Scenario 3
+
+**Conservation target: 15% Afforestation and 15% wetland reclamation with connectivity penalisation**
+
+```{r include= F}
+
+library(prioritizr)
+library(terra)
+
+# ---- 1. Use the same cost surface with urban areas as Scenario 2 ----
+cost_surface_terra <- rast(cost_surface)
+
+# Assign high cost to urban polygons
+cost_surface_terra[urban_raster == 1] <- max(values(cost_surface_terra), na.rm = TRUE) * 10
+
+# ---- 2. Binary features ----
+affor_bin <- ifel(afforestation_terra > 0.5, 1, 0)
+wetland_bin <- ifel(wetland_terra > 0.5, 1, 0)
+
+# ---- 3. Targets ----
+total_pixels <- ncell(cost_surface_terra)
+wetland_target <- ceiling(0.15 * total_pixels)
+forest_target  <- ceiling(0.15 * total_pixels)
+
+# ---- 4. Prioritize wetlands first (same as Scenario 2) ----
+p_wet <- problem(cost_surface_terra, features = wetland_bin) %>%
+  add_min_set_objective() %>%
+  add_absolute_targets(wetland_target) %>%
+  add_binary_decisions() %>%
+  add_default_solver(verbose = TRUE)
+
+s_wet <- solve(p_wet, force = TRUE)
+
+# ---- 5. Prioritize forests with connectivity penalty ----
+forest_bin <- affor_bin
+forest_bin[s_wet == 1] <- 0  # wetlands take precedence
+
+p_forest <- problem(cost_surface_terra, features = forest_bin) %>%
+  add_min_set_objective() %>%
+  add_absolute_targets(forest_target) %>%
+  add_boundary_penalties(penalty = 1, edge_factor = 1) %>%  # connectivity penalty
+  add_binary_decisions() %>%
+  add_default_solver(verbose = TRUE)
+
+s_forest <- solve(p_forest, force = TRUE)
+
+# ---- 6. Combine results ----
+final_map <- s_wet * 1 + s_forest * 2
+
+
+```
+
+```{r fig.width= 5, fig.height= 5, echo=FALSE}
+
+# ---- 7. Plot ----
+cols <- c("white", "blue", "darkgreen")
+plot(final_map, col = cols)
+plot(urban_polys, add = TRUE, col = "red", border = "black", lwd = 2)
+
+```
+
+In this scenario, the conservation targets remain the same as previous scenarios—15% of the landscape for wetlands and 15% for afforestation—but an additional connectivity penalty is applied to the forest selection. This penalty encourages selected forest pixels to form larger contiguous clusters rather than isolated patches, promoting ecological connectivity and habitat cohesion. Wetlands are still prioritized first and are unaffected by the forest connectivity constraint. By incorporating this spatial clustering criterion, the prioritization model balances cost-efficiency with ecological realism, supporting wildlife movement, reducing edge effects, and enhancing long-term habitat stability. Urban and industrial zones continue to be treated as high-cost areas, preventing conservation efforts from conflicting with future development plans.
+
+
+```{r}
+
+# ---- 8. Calculate costs ----
+wetland_cost <- global(cost_surface_terra * s_wet, fun = "sum", na.rm = TRUE)[[1]]
+forest_cost <- global(cost_surface_terra * s_forest, fun = "sum", na.rm = TRUE)[[1]]
+total_cost <- wetland_cost + forest_cost
+
+cat("Wetland selection cost:", wetland_cost, "\n")
+cat("Forest selection cost:", forest_cost, "\n")
+cat("Total cost of selected areas:", total_cost, "\n")
+
+```
